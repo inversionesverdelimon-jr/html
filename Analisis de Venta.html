@@ -16,7 +16,7 @@
   --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.05);
 }
 @media (prefers-color-scheme: dark){
-  :root:where(:not([data-theme="light"])){
+  :root:not([data-theme="light"]){
     color-scheme: dark;
     --bg:#121211; --surface:#1a1a19; --surface-2:#20201f; --border:#2e2e2c; --border-strong:#3c3c39;
     --text:#f0efec; --text-2:#c3c2b7; --text-3:#94938b;
@@ -27,6 +27,16 @@
     --shadow:none;
   }
 }
+:root[data-theme="dark"]{
+    color-scheme: dark;
+    --bg:#121211; --surface:#1a1a19; --surface-2:#20201f; --border:#2e2e2c; --border-strong:#3c3c39;
+    --text:#f0efec; --text-2:#c3c2b7; --text-3:#94938b;
+    --accent:#3987e5; --accent-soft:#1d2a3b;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --s6:#0ca30c; --s7:#9085e9; --s8:#e66767;
+    --good:#3fbf3f; --good-bg:#16301a; --crit:#ef7a7a; --crit-bg:#3a1c1c; --warn:#f2bf4a; --warn-bg:#3a2f12; --info:#6aa8f0; --info-bg:#1d2a3b;
+    --grid:#2a2a28; --axis:#45453f; --hover:rgba(255,255,255,.05);
+    --shadow:none;
+  }
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-variant-numeric:tabular-nums}
 button,select,input{font:inherit;color:inherit}
@@ -492,7 +502,7 @@ function analyzeSheet(sheet, settings, fileName){
 
   if(h<0){
     // sin encabezados reconocibles: inferir por contenido
-    const r = analyzeByContent(rows, settings, res);
+    const r = analyzeByContent(rows, settings, res, ov.mapping);
     if(r.records.length) return r;
     if(sheet.lines) return analyzeLines(sheet.lines, settings, res);
     res.formatLabel = 'No reconocido';
@@ -781,11 +791,12 @@ function analyzeLong(headers, body, settings, res, forced, defaultYear){
   return res;
 }
 
-function analyzeByContent(rows, settings, res){
+function analyzeByContent(rows, settings, res, forced){
   // Sin encabezado: buscar columna de fechas y la numérica con mayor suma
   const width = Math.max(...rows.slice(0,200).map(r=>r.length));
   const headers = Array.from({length:width},(_,i)=>`Columna ${i+1}`);
-  const r = analyzeLong(headers, rows, settings, res, null, null);
+  res.headers = headers;
+  const r = analyzeLong(headers, rows, settings, res, forced||null, null);
   if(r.records.length){ r.formatLabel += ' · sin encabezados'; }
   return r;
 }
@@ -848,6 +859,14 @@ function parseCSV(text){
   }
   if(cur!=='' || row.length){ row.push(cur); rows.push(row); }
   return rows.map(r=>r.map(c=>c.trim()===''?null:c.trim()));
+}
+
+/* Lee texto en UTF-8; si trae caracteres inválidos (CSV de Excel en Windows), usa Windows-1252 */
+async function readText(file){
+  const buf = await file.arrayBuffer();
+  const utf = new TextDecoder('utf-8').decode(buf);
+  if(!utf.includes('\uFFFD')) return utf;
+  try{ return new TextDecoder('windows-1252').decode(buf); }catch(e){ return utf; }
 }
 
 async function readPdf(file){
@@ -1030,7 +1049,7 @@ function buildChecks(monthSrc, futureCount){
   if(devRatio.length) out.push({lvl:'warn', lbl:'Devoluciones altas', txt: devRatio.map(o=>`${o.y}: ${fmtPctAbs(o.r)} de las ventas`).join(' · ') + '.'});
   // Mes parcial
   const ly = Math.max(...years); const lm = Math.max(...Object.keys(state.agg[ly]).map(Number)); const lc = state.agg[ly][lm];
-  if(lc.hasDays && lc.maxDay < new Date(ly,lm+1,0).getDate()) out.push({lvl:'info', lbl:'Mes en curso', txt:`${MES_LARGO[lm]} ${ly} tiene datos hasta el día ${lc.maxDay}; las comparaciones contra el año anterior usan el mismo rango de días (1–${lc.maxDay}).`});
+  if(lc.hasDays && lc.maxDay < new Date(ly,lm+1,0).getDate() && monthOpen(ly,lm)) out.push({lvl:'info', lbl:'Mes en curso', txt:`${MES_LARGO[lm]} ${ly} tiene datos hasta el día ${lc.maxDay}; las comparaciones contra el año anterior usan el mismo rango de días (1–${lc.maxDay}).`});
   // advertencias por archivo
   for(const {f,s} of sheetsAll) for(const w of s.result.warnings) out.push({lvl:'warn', lbl:esc(f.name), txt:esc(w)});
   for(const f of state.files) if(f.error) out.push({lvl:'crit', lbl:esc(f.name), txt:esc(f.error)});
@@ -1055,7 +1074,11 @@ function badge(p){ if(p==null) return '<span class="badge na">sin comparativo</s
 function signCls(n){ return n==null?'':n<0?'neg':n>0?'pos':''; }
 
 /* Color fijo por año: el más reciente = serie 1 (azul), el anterior = serie 2 (naranja)… */
-function yearColor(y){ const idx = [...state.years].sort((a,b)=>b-a).indexOf(y); return `var(--s${Math.min(8, idx+1)})`; }
+function yearColor(y){
+  const ys = [...state.years].sort((a,b)=>b-a); let idx = ys.indexOf(y);
+  if(idx<0) idx = ys.filter(v=>v>y).length; // año sin datos: usa la posición que tendría
+  return `var(--s${Math.min(8, idx+1)})`;
+}
 
 /* ============================================================
    Render
@@ -1130,6 +1153,8 @@ function renderControls(){
   $('meta').textContent = `Actualizado ${state.lastAt.toLocaleTimeString('es-CO',{hour:'numeric',minute:'2-digit',second:'2-digit'})} · ${state.lastMs} ms`;
 }
 
+/* Un mes es "en curso" solo si aún no ha terminado (hoy está dentro o antes de su último día) */
+function monthOpen(y,m){ return new Date(y, m+1, 1) > new Date(); }
 function anchorInfo(){
   const cy = Math.max(...state.sel);
   const Y = state.agg[cy] || {};
@@ -1137,7 +1162,7 @@ function anchorInfo(){
   const am = months.length ? Math.max(...months) : state.hasta;
   const c = Y[am];
   const dim = new Date(cy, am+1, 0).getDate();
-  const partialDay = c && c.hasDays && c.maxDay < dim ? c.maxDay : null;
+  const partialDay = c && c.hasDays && c.maxDay < dim && monthOpen(cy,am) ? c.maxDay : null;
   return {cy, am, partialDay};
 }
 
@@ -1224,7 +1249,9 @@ function renderChart(){
   const groupW = k*barW + (k-1)*2;
   const {cy, am, partialDay} = anchorInfo();
   let s = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="Ventas netas por mes, ${years.join(' y ')}">`;
-  for(let v=bot; v<=top+step/2; v+=step){
+  const nT = Math.round((top-bot)/step);
+  for(let t=0; t<=nT; t++){
+    const v = bot + t*step;
     const yy = yS(v);
     s += `<line x1="${ml}" x2="${W-mr}" y1="${yy}" y2="${yy}" stroke="${v===0?'var(--axis)':'var(--grid)'}" stroke-width="1"/>`;
     s += `<text x="${ml-8}" y="${yy+4}" text-anchor="end" font-size="11" fill="var(--text-3)">${fmtShort(v,unit)}</text>`;
@@ -1447,7 +1474,7 @@ async function handleFiles(list){
         const wb = XLSX.read(await file.arrayBuffer(), {type:'array', cellDates:true});
         f.sheets = wb.SheetNames.map(n=>({name:n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], {header:1, raw:true, defval:null, blankrows:false})}));
       } else if(['csv','txt','tsv'].includes(ext)){
-        f.sheets = [{name:'CSV', rows: parseCSV(await file.text())}];
+        f.sheets = [{name:'CSV', rows: parseCSV(await readText(file))}];
       } else if(ext==='pdf'){
         const r = await readPdf(file);
         f.sheets = r.sheets; f.pages = r.pages; f.scanned = !!r.scanned;
